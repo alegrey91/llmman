@@ -4383,6 +4383,26 @@ async fn serve_async(_args: &ServeArgs) -> anyhow::Result<()> {
     // before it starts listening.
     crate::storage::repair::repair_store(&store_path)?;
 
+    // Catch-all GC sweep, right after repair: removes blobs/cache orphaned
+    // by anything other than `rm` (a crash mid-pull past the grace window,
+    // manual store surgery, an old build's leftover cache after a format
+    // change). Grace-gated (unlike `rm`, which frees immediately) so a blob
+    // written moments before its tag during a concurrent pull survives.
+    // Gated by the same LLMMAN_NOPRUNE escape hatch as `rm`.
+    if !crate::storage::gc::noprune_from_env() {
+        if let Ok(store) = OciStore::open(&store_path) {
+            if let Ok(live) = crate::storage::gc::referenced_digests(&store) {
+                let grace = crate::storage::gc::GC_GRACE_PERIOD;
+                if let Err(e) = crate::storage::gc::prune_blobs(&store_path, &live, grace) {
+                    eprintln!("[llmman] blob GC sweep failed: {e:#}");
+                }
+                if let Err(e) = crate::storage::gc::prune_cache(&cache_path, &live, grace) {
+                    eprintln!("[llmman] cache GC sweep failed: {e:#}");
+                }
+            }
+        }
+    }
+
     // See context_length_from_env's doc comment. spawn_blocking: like
     // resolve_llama_server above, the VRAM probe fallback spawns a
     // subprocess and must not block this async fn's executor thread.

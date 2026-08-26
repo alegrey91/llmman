@@ -201,7 +201,7 @@ impl OciStore {
     /// `org.opencontainers.image.ref.name` annotation. A single
     /// unreadable or unparsable entry is skipped rather than failing the
     /// whole walk.
-    fn list_refs(&self) -> Vec<Descriptor> {
+    pub(crate) fn list_refs(&self) -> Vec<Descriptor> {
         let root = self.root.join("manifests");
         let mut out = Vec::new();
         collect_refs(&root, &mut out);

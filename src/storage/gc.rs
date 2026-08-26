@@ -63,7 +63,11 @@ pub fn referenced_digests(store: &OciStore) -> anyhow::Result<HashSet<String>> {
 /// digest isn't in `live`, skipping in-progress temp writes (`tmp-`/
 /// `.tmp`, same as [`crate::storage::repair`]) and anything younger than
 /// `grace`. A missing blobs directory is a no-op.
-pub fn prune_blobs(store_root: &Path, live: &HashSet<String>, grace: Duration) -> anyhow::Result<GcStats> {
+pub fn prune_blobs(
+    store_root: &Path,
+    live: &HashSet<String>,
+    grace: Duration,
+) -> anyhow::Result<GcStats> {
     let blobs_dir = store_root.join("blobs").join("sha256");
     let mut stats = GcStats::default();
     let entries = match std::fs::read_dir(&blobs_dir) {
@@ -103,7 +107,11 @@ pub fn prune_blobs(store_root: &Path, live: &HashSet<String>, grace: Duration) -
 /// `modelpack::extract_gguf_layer` / `extract_safetensors_dir`) doesn't
 /// correspond to a live digest, skipping anything younger than `grace`. A
 /// missing cache directory is a no-op.
-pub fn prune_cache(cache_path: &Path, live: &HashSet<String>, grace: Duration) -> anyhow::Result<GcStats> {
+pub fn prune_cache(
+    cache_path: &Path,
+    live: &HashSet<String>,
+    grace: Duration,
+) -> anyhow::Result<GcStats> {
     let live_hex: HashSet<&str> = live
         .iter()
         .filter_map(|d| d.strip_prefix("sha256:"))
@@ -189,7 +197,10 @@ fn parse_noprune(value: Option<&str>) -> bool {
     if v.is_empty() {
         return false;
     }
-    !matches!(v.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+    !matches!(
+        v.to_ascii_lowercase().as_str(),
+        "0" | "false" | "no" | "off"
+    )
 }
 
 #[cfg(test)]

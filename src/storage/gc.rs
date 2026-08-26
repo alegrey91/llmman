@@ -13,9 +13,11 @@
 //! same way [`crate::storage::repair`] gates its stale-temp-file sweep: a
 //! blob is written before its manifest/tag pointer, so a blob can be
 //! legitimately unreferenced for a moment mid-pull — anything younger than
-//! `grace` is left alone. `rm` passes a zero grace (a synchronous,
-//! user-initiated removal wants space freed now); the `serve` startup
-//! catch-all passes the hour-long window.
+//! `grace` is left alone. Both `rm` and the `serve` startup catch-all pass
+//! the hour-long [`GC_GRACE_PERIOD`]: `pull` runs in the long-lived `serve`
+//! daemon, so a concurrent `rm` in a separate process can race a pull that
+//! has written a layer blob but not yet tagged its manifest — only the
+//! grace window, not `rm` being synchronous, protects that blob.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -40,19 +42,25 @@ pub struct GcStats {
 
 /// Every blob digest ("sha256:<hex>") still reachable from a surviving
 /// tag: each manifest's own digest, its config digest, and every layer
-/// digest. Built by walking [`OciStore::list_refs`] and reading each
+/// digest. Built by walking [`OciStore::list_refs_strict`] and reading each
 /// manifest — the same traversal `resolve_model` does per-reference, just
-/// over every reference at once. A manifest that can't be read is skipped
-/// (its blobs then look unreferenced) — acceptable, since an unreadable
-/// manifest is already a broken/incomplete image, but conservative callers
-/// run this only right after a successful `remove`.
+/// over every reference at once.
+///
+/// This is the authority for a *destructive* sweep, so it fails closed:
+/// any reference that can't be enumerated (an unreadable pointer file or
+/// subtree) or any manifest that can't be read/parsed aborts the whole
+/// computation with an error. The alternative — skipping the unreadable
+/// entry, as the display-oriented `list_refs` does — would make that
+/// model's config/layers look unreferenced and get deleted, possibly
+/// destroying blobs shared with other healthy models. When we can't prove
+/// what's still referenced, callers must delete nothing.
 pub fn referenced_digests(store: &OciStore) -> anyhow::Result<HashSet<String>> {
     let mut live = HashSet::new();
-    for desc in store.list_refs() {
+    for desc in store.list_refs_strict()? {
         live.insert(desc.digest.clone());
-        let Ok(manifest) = store.read_manifest(&desc.digest) else {
-            continue;
-        };
+        let manifest = store
+            .read_manifest(&desc.digest)
+            .with_context(|| format!("read manifest {} for GC reference scan", desc.digest))?;
         live.insert(manifest.config.digest.clone());
         live.extend(manifest.layers.iter().map(|l| l.digest.clone()));
     }
@@ -149,9 +157,9 @@ pub fn prune_cache(
 }
 
 /// True if `path`'s mtime is at least `grace` old. A zero `grace` makes
-/// this always true (used by `rm`, which frees immediately). A file whose
-/// mtime can't be read is treated as not-yet-old, so it's left alone
-/// rather than deleted on a metadata hiccup.
+/// this always true (used only by tests that want to sweep regardless of
+/// age). A file whose mtime can't be read is treated as not-yet-old, so
+/// it's left alone rather than deleted on a metadata hiccup.
 fn is_older_than(path: &Path, grace: Duration) -> bool {
     if grace.is_zero() {
         return true;
@@ -308,6 +316,50 @@ mod tests {
         assert!(!cache.join("bbbb").exists(), "orphan cache dir removed");
 
         std::fs::remove_dir_all(&cache).unwrap();
+    }
+
+    /// A corrupt (unparsable) manifest pointer file must abort the live-set
+    /// computation rather than silently omitting that model — otherwise its
+    /// blobs would look unreferenced and a destructive sweep would delete
+    /// them. Fail closed: an error, so callers prune nothing.
+    #[test]
+    fn referenced_digests_aborts_on_an_unreadable_reference() {
+        let root = temp_dir("referenced-digests-strict");
+        let store = OciStore::open(&root).unwrap();
+
+        // A real, healthy tagged model.
+        let cfg = store
+            .write_blob("application/vnd.cncf.model.config.v1+json", b"{}")
+            .unwrap();
+        let manifest = crate::storage::oci::Manifest {
+            schema_version: 2,
+            media_type: "application/vnd.oci.image.manifest.v1+json".into(),
+            artifact_type: None,
+            config: cfg,
+            layers: vec![],
+            annotations: None,
+        };
+        let desc = store.write_manifest(&manifest).unwrap();
+        store.tag(desc, "hf.co/ai/healthy:latest").unwrap();
+
+        // A corrupt pointer file elsewhere in manifests/ — enumeration
+        // can't parse it, so the whole scan must fail rather than proceed
+        // with an incomplete live set.
+        let corrupt = root
+            .join("manifests")
+            .join("hf.co")
+            .join("ai")
+            .join("broken")
+            .join("latest");
+        std::fs::create_dir_all(corrupt.parent().unwrap()).unwrap();
+        std::fs::write(&corrupt, b"not json").unwrap();
+
+        assert!(
+            referenced_digests(&store).is_err(),
+            "an unparsable reference must abort the live-set scan, not be skipped"
+        );
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

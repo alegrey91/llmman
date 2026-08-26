@@ -259,6 +259,38 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// The concurrent-pull safety property: an unreferenced blob younger
+    /// than the grace window is left alone (it may be a layer an in-flight
+    /// pull has already written but not yet tagged), while an equally
+    /// unreferenced but older blob is swept. Without this, a concurrent
+    /// `rm` could delete a live pull's just-written layer.
+    #[test]
+    #[cfg(unix)]
+    fn prune_blobs_respects_the_grace_window() {
+        let root = temp_dir("prune-blobs-grace");
+        let blobs = root.join("blobs").join("sha256");
+        std::fs::create_dir_all(&blobs).unwrap();
+        let fresh = blobs.join("cccc");
+        let stale = blobs.join("dddd");
+        std::fs::write(&fresh, b"just written by an in-flight pull").unwrap();
+        std::fs::write(&stale, b"long-abandoned orphan").unwrap();
+        // Back-date the stale blob past the grace window.
+        let old = SystemTime::now() - GC_GRACE_PERIOD - Duration::from_secs(60);
+        filetime_set(&stale, old);
+
+        let live = HashSet::new(); // neither is referenced
+        let stats = prune_blobs(&root, &live, GC_GRACE_PERIOD).unwrap();
+
+        assert_eq!(stats.count, 1);
+        assert!(
+            fresh.exists(),
+            "a fresh unreferenced blob must survive — it may be a live pull's untagged layer"
+        );
+        assert!(!stale.exists(), "a stale unreferenced blob must be swept");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn prune_cache_removes_only_unreferenced_dirs() {
         let cache = temp_dir("prune-cache");
@@ -289,5 +321,23 @@ mod tests {
                 .count,
             0
         );
+    }
+
+    /// Minimal mtime-backdating helper — mirrors the one in
+    /// `storage::repair`'s tests, avoiding a `filetime` dependency just for
+    /// this. Unix-only, like that one.
+    #[cfg(unix)]
+    fn filetime_set(path: &Path, when: SystemTime) {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(path).unwrap();
+        let d = when.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        let tv = libc::timeval {
+            tv_sec: d.as_secs() as _,
+            tv_usec: d.subsec_micros() as _,
+        };
+        let times = [tv, tv];
+        unsafe {
+            libc::futimes(file.as_raw_fd(), times.as_ptr());
+        }
     }
 }

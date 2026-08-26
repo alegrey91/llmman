@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use clap::Args;
 
 use crate::storage::{gc, OciStore};
@@ -37,14 +35,20 @@ pub fn run(args: &RmArgs) -> anyhow::Result<()> {
 
     // GC once, after every requested reference is untagged: recompute the
     // still-referenced digest set from the surviving manifests, then sweep
-    // blobs/cache not in it. Grace 0 — `rm` is synchronous and
-    // user-initiated, so free the space immediately (the startup sweep in
-    // `serve` uses the grace window for the concurrent-pull case instead).
+    // blobs/cache not in it. Uses the same grace window as serve's startup
+    // sweep, NOT zero: `llmman pull` runs in the long-lived `serve` daemon,
+    // which writes each layer blob to its final path as it downloads and
+    // only writes the manifest + tag at the very end. A concurrent
+    // `rm <unrelated>` would otherwise see that not-yet-tagged blob as an
+    // orphan and delete it mid-pull. The writer is a different process, so
+    // `rm` being synchronous doesn't protect it — only the grace window
+    // does (matches Ollama's layerPruneGracePeriod).
     if any_removed && !gc::noprune_from_env() {
         let live = gc::referenced_digests(&store)?;
         let cache_path = crate::default_cache()?;
-        let blob_stats = gc::prune_blobs(&store_root, &live, Duration::ZERO)?;
-        let cache_stats = gc::prune_cache(&cache_path, &live, Duration::ZERO)?;
+        let grace = gc::GC_GRACE_PERIOD;
+        let blob_stats = gc::prune_blobs(&store_root, &live, grace)?;
+        let cache_stats = gc::prune_cache(&cache_path, &live, grace)?;
         if blob_stats.count > 0 || cache_stats.count > 0 {
             println!(
                 "Freed {} ({} blobs, {} cache entries)",

@@ -4376,7 +4376,7 @@ async fn serve_async(_args: &ServeArgs) -> anyhow::Result<()> {
         None
     };
     let store_path = default_store()?;
-    let cache_path = store_path.parent().unwrap_or(&store_path).join("cache");
+    let cache_path = crate::default_cache()?;
     std::fs::create_dir_all(&cache_path)?;
     // See storage::repair's own doc comment — matches Ollama's own
     // unconditional `fixBlobs(blobsDir)` at the top of `server.Serve`,
